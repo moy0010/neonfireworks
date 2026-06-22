@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEON BLOOM — Interactive Design Mapping V3</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #000; font-family: 'Helvetica Neue', Arial, sans-serif; }
+        canvas { display: block; }
+
+        #cam-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            gap: 16px;
+        }
+        #cam-overlay p {
+            color: #aaa;
+            font-size: 13px;
+            max-width: 320px;
+            text-align: center;
+            line-height: 1.6;
+        }
+        #cam-overlay h2 {
+            color: #fff;
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+        .cam-btn {
+            padding: 12px 32px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            letter-spacing: 0.04em;
+            transition: opacity 0.2s;
+        }
+        .cam-btn:hover { opacity: 0.85; }
+        #btn-allow  { background: #00CCFF; color: #000; }
+        #btn-skip   { background: transparent; border: 1px solid #444; color: #888; }
+        #cam-status { color: #FF5555; font-size: 12px; min-height: 16px; }
+    </style>
+</head>
+<body>
+
+<!-- Overlay izin kamera -->
+<div id="cam-overlay">
+    <h2>📷 IZIN KAMERA</h2>
+    <p>NEON BLOOM menggunakan kamera untuk mendeteksi gerakan dan mengaktifkan mode animasi <strong style="color:#00CCFF">EXCITED</strong>.<br>Kamera tidak direkam atau dikirim ke mana pun.</p>
+    <div id="cam-status"></div>
+    <button class="cam-btn" id="btn-allow">Izinkan Kamera</button>
+    <button class="cam-btn" id="btn-skip">Lewati — Tanpa Kamera</button>
+</div>
+
+<script>
+// =============================================================================
+// NEON BLOOM V3 — Interactive Projection Mapping
+// Controls: [F] Fullscreen | [S] Save | [C] Change Palette | [H] Toggle UI
+// =============================================================================
+
+const PALETTES = [
+    {
+        name: "Festive Co-Creation",
+        colors: ['#FF0055','#FF9900','#FFDD00','#00CCFF','#00FF66','#AA00FF'],
+        accent: ['#FFFFFF','#FFDD00','#00FFFF'],
+        bg: [0,0,0]
+    },
+    {
+        name: "Neon Cyberbloom",
+        colors: ['#00F5FF','#0080FF','#1E90FF','#00FFFF'],
+        accent: ['#E0FFFF','#00FFFF'],
+        bg: [5,5,8]
+    },
+    {
+        name: "Earth Tone Inclusive",
+        colors: ['#E64A19','#F57C00','#FFB74D','#8D6E63'],
+        accent: ['#FFF3E0','#FFCC80'],
+        bg: [12,8,6]
+    }
+];
+
+let currentPaletteIdx = 0;
+let manager, sensor;
+let showUI = false;
+let cameraEnabled = false; // diset setelah user pilih
+
+// ── Overlay logic ────────────────────────────────────────────────────────────
+document.getElementById('btn-allow').addEventListener('click', async () => {
+    const status = document.getElementById('cam-status');
+    status.textContent = 'Meminta izin…';
+    try {
+        // Minta izin dulu via getUserMedia agar browser menampilkan dialog
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream.getTracks().forEach(t => t.stop()); // stop dulu, p5 akan buka ulang
+        cameraEnabled = true;
+        document.getElementById('cam-overlay').remove();
+        // Init p5 setelah izin diberikan
+        new p5(sketch);
+    } catch(e) {
+        if (e.name === 'NotAllowedError') {
+            status.textContent = '❌ Akses ditolak. Cek pengaturan browser lalu refresh.';
+        } else {
+            status.textContent = '❌ Kamera tidak tersedia: ' + e.message;
+        }
+    }
+});
+
+document.getElementById('btn-skip').addEventListener('click', () => {
+    cameraEnabled = false;
+    document.getElementById('cam-overlay').remove();
+    new p5(sketch);
+});
+
+// ── p5 sketch ────────────────────────────────────────────────────────────────
+const sketch = (p) => {
+
+    function easeOutCubic(x) { return 1 - Math.pow(1-x, 3); }
+    function hexAlpha(hex, a) {
+        let c = p.color(hex);
+        return `rgba(${p.red(c)|0},${p.green(c)|0},${p.blue(c)|0},${a})`;
+    }
+
+    // ── GenerativeMotif ──────────────────────────────────────────────────────
+    class GenerativeMotif {
+        constructor(x, y, size, col, accentCols, isExcited) {
+            this.x = x; this.y = y;
+            this.maxRadius = size;
+            this.baseColor = col;
+            this.accentColors = accentCols;
+            this.spawnTime = p.millis();
+
+            this.bloomDuration   = isExcited ? p.random(600,1000)  : p.random(1200,1800);
+            this.fadeOutDuration = isExcited ? p.random(1000,1500) : p.random(2000,3000);
+
+            this.state = 'BLOOM';
+            this.fadeOutStart = 0; this.progress = 0; this.opacity = 1;
+
+            this.linesCount = p.random([12,16,24,32]);
+            this.rotOffset  = p.random(p.TWO_PI);
+            this.styleType  = p.floor(p.random(0,4));
+            this.ringLayers = p.floor(p.random(2,5));
+        }
+        update() {
+            let age = p.millis() - this.spawnTime;
+            if (this.state === 'BLOOM') {
+                this.progress = easeOutCubic(p.min(age / this.bloomDuration, 1));
+                this.opacity = 1;
+                if (age >= this.bloomDuration) this.state = 'IDLE';
+            } else if (this.state === 'IDLE') {
+                this.progress = 1;
+                this.opacity = p.map(p.sin(p.millis()*0.003 + this.rotOffset), -1, 1, 0.6, 1);
+            } else if (this.state === 'FADEOUT') {
+                this.progress = 1;
+                let t = p.millis() - this.fadeOutStart;
+                this.opacity = p.constrain(p.map(t, 0, this.fadeOutDuration, 1, 0), 0, 1);
+            }
+        }
+        fadeOut() {
+            if (this.state !== 'FADEOUT') {
+                this.state = 'FADEOUT';
+                this.fadeOutStart = p.millis();
+            }
+        }
+        isDead() { return this.state === 'FADEOUT' && this.opacity <= 0.01; }
+        draw() {
+            if (this.opacity <= 0.01) return;
+            p.push();
+            p.translate(this.x, this.y); p.rotate(this.rotOffset);
+            p.drawingContext.shadowBlur = 10;
+            p.drawingContext.shadowColor = this.baseColor;
+
+            let r    = this.maxRadius * this.progress;
+            let step = p.TWO_PI / this.linesCount;
+
+            for (let i = 0; i < this.linesCount; i++) {
+                let a = i * step, cosA = p.cos(a), sinA = p.sin(a);
+                if (this.styleType === 0) {
+                    p.stroke(hexAlpha(this.baseColor, this.opacity)); p.strokeWeight(2);
+                    p.line(cosA*(r*0.1), sinA*(r*0.1), cosA*r, sinA*r);
+                    p.noStroke(); p.fill(hexAlpha(p.random(this.accentColors), this.opacity));
+                    p.ellipse(cosA*r, sinA*r, 4, 4);
+                } else if (this.styleType === 1) {
+                    p.noStroke();
+                    for (let j=1; j<=this.ringLayers; j++) {
+                        let layerR = r*(j/this.ringLayers);
+                        p.fill(hexAlpha(this.baseColor, this.opacity*(1-j*0.1)));
+                        p.ellipse(cosA*layerR, sinA*layerR, 5, 5);
+                    }
+                } else if (this.styleType === 2) {
+                    p.stroke(hexAlpha(this.baseColor, this.opacity)); p.strokeWeight(2.5);
+                    for (let j=0.2; j<1; j+=0.3)
+                        p.line(cosA*(r*j), sinA*(r*j), cosA*(r*(j+0.15)), sinA*(r*(j+0.15)));
+                } else {
+                    p.stroke(hexAlpha(this.baseColor, this.opacity)); p.strokeWeight(1.5);
+                    p.line(cosA*(r*0.2), sinA*(r*0.2), cosA*(r*0.6), sinA*(r*0.6));
+                    p.noStroke(); p.fill(hexAlpha(this.accentColors[0], this.opacity));
+                    p.ellipse(cosA*r, sinA*r, 3, 3);
+                    p.ellipse(cosA*(r*0.8), sinA*(r*0.8), 2, 2);
+                }
+            }
+            p.noStroke(); p.fill(hexAlpha(this.accentColors[0], this.opacity));
+            p.ellipse(0, 0, r*0.15, r*0.15);
+            p.pop();
+        }
+    }
+
+    // ── MotifManager ─────────────────────────────────────────────────────────
+    class MotifManager {
+        constructor() {
+            this.motifs = []; this.isExcited = false;
+            this.lastSpawnTime = 0; this.nextInterval = 1000;
+        }
+        _pickInterval() { return this.isExcited ? p.random(50,180) : p.random(2000,4000); }
+        setExcitedMode(val) {
+            if (this.isExcited !== val) {
+                this.isExcited = val;
+                this.nextInterval = this._pickInterval();
+                if (val) for (let i=0; i<6; i++) this.spawn();
+            }
+        }
+        update() {
+            let now = p.millis();
+            let maxCount = this.isExcited ? 70 : 12;
+            if (now - this.lastSpawnTime >= this.nextInterval) {
+                while (this.motifs.length >= maxCount) this.cullOldest();
+                let batch = this.isExcited ? p.floor(p.random(3,7)) : 1;
+                for (let i=0; i<batch; i++) this.spawn();
+                this.lastSpawnTime = now;
+                this.nextInterval = this._pickInterval();
+            }
+            for (let i = this.motifs.length-1; i >= 0; i--) {
+                this.motifs[i].update();
+                if (this.motifs[i].isDead()) this.motifs.splice(i,1);
+            }
+        }
+        spawn() { this.spawnAt(p.random(p.width*0.05, p.width*0.95), p.random(p.height*0.05, p.height*0.95)); }
+        spawnAt(x, y) {
+            let sizes = this.isExcited ? [40,60,80,100] : [50,70,90];
+            let pal = PALETTES[currentPaletteIdx];
+            this.motifs.push(new GenerativeMotif(x, y, p.random(sizes), p.random(pal.colors), pal.accent, this.isExcited));
+        }
+        cullOldest() {
+            for (let m of this.motifs) { if (m.state !== 'FADEOUT') { m.fadeOut(); return; } }
+            if (this.motifs.length > 0) this.motifs.splice(0,1);
+        }
+        draw() {
+            let sorted = [...this.motifs].sort((a,b) => {
+                let order = {FADEOUT:0, IDLE:1, BLOOM:2};
+                return (order[a.state]||0) - (order[b.state]||0);
+            });
+            for (let m of sorted) m.draw();
+        }
+    }
+
+    // ── ProximitySensor ──────────────────────────────────────────────────────
+    class ProximitySensor {
+        constructor() {
+            this.camReady = false; this.prevPixels = null;
+            this.motionScore = 0; this.triggered = false; this.calmSince = 0;
+            this.capture = null;
+
+            if (!cameraEnabled) return;
+
+            try {
+                this.capture = p.createCapture(p.VIDEO, () => { this.camReady = true; });
+                this.capture.size(64, 48);
+                this.capture.hide();
+            } catch(e) {
+                console.error('Camera init failed', e);
+                this.capture = null;
+            }
+        }
+        update() {
+            this.detectMotion();
+            if (this.motionScore > 8) {
+                this.triggered = true;
+                this.calmSince = 0;
+            } else {
+                if (this.calmSince === 0) this.calmSince = p.millis();
+                if (p.millis() - this.calmSince > 1000) this.triggered = false;
+            }
+        }
+        detectMotion() {
+            if (!this.camReady || !this.capture || !this.capture.elt) return;
+            if (this.capture.elt.readyState !== 4) return;
+            this.capture.loadPixels();
+            let px = this.capture.pixels;
+            if (!px || px.length === 0) return;
+            if (!this.prevPixels || this.prevPixels.length !== px.length) {
+                this.prevPixels = new Uint8ClampedArray(px);
+                return;
+            }
+            let diff = 0, total = px.length / 4;
+            for (let i=0; i<px.length; i+=4) {
+                if (Math.abs(px[i]-this.prevPixels[i]) + Math.abs(px[i+1]-this.prevPixels[i+1]) + Math.abs(px[i+2]-this.prevPixels[i+2]) > 50) diff++;
+                this.prevPixels[i]   = px[i];
+                this.prevPixels[i+1] = px[i+1];
+                this.prevPixels[i+2] = px[i+2];
+            }
+            this.motionScore = (diff / total) * 100;
+        }
+        isTriggered() { return this.triggered; }
+    }
+
+    // ── p5 lifecycle ─────────────────────────────────────────────────────────
+    let _manager, _sensor;
+
+    p.setup = () => {
+        p.createCanvas(window.innerWidth, window.innerHeight);
+        p.frameRate(60);
+        p.colorMode(p.RGB, 255);
+        _sensor  = new ProximitySensor();
+        _manager = new MotifManager();
+        _manager.spawn();
+        manager = _manager;
+        sensor  = _sensor;
+    };
+
+    p.draw = () => {
+        let bg = PALETTES[currentPaletteIdx].bg;
+        p.background(bg[0], bg[1], bg[2], 255);
+        _sensor.update();
+        _manager.setExcitedMode(_sensor.isTriggered());
+        _manager.update();
+        _manager.draw();
+        if (showUI) drawUI(p, _manager, _sensor);
+    };
+
+    p.windowResized = () => { p.resizeCanvas(window.innerWidth, window.innerHeight); };
+
+    p.keyPressed = () => {
+        if (p.key === 'f' || p.key === 'F') p.fullscreen(!p.fullscreen());
+        else if (p.key === 's' || p.key === 'S')
+            p.saveCanvas('neonbloom_' + p.year() + p.nf(p.month(),2) + p.nf(p.day(),2), 'png');
+        else if (p.key === 'c' || p.key === 'C')
+            currentPaletteIdx = (currentPaletteIdx + 1) % PALETTES.length;
+        else if (p.key === 'h' || p.key === 'H') showUI = !showUI;
+    };
+
+    p.mousePressed = () => {
+        if (showUI && p.mouseX < 300 && p.mouseY < 180) return;
+        _manager.spawnAt(p.mouseX, p.mouseY);
+    };
+
+    function drawUI(p, mgr, sns) {
+        p.push();
+        p.fill(10,10,15,200); p.stroke(255,255,255,30); p.strokeWeight(1);
+        p.rect(15,15,280,155,10);
+
+        let camStr  = cameraEnabled ? '✅ Aktif' : '🚫 Nonaktif';
+        let modeStr = mgr.isExcited ? '🔥 GERAKAN TERDETEKSI!' : '❄️ STANDBY';
+        let modeCol = mgr.isExcited ? p.color(255,80,120) : p.color(0,245,255);
+
+        p.noStroke(); p.textSize(12); p.textStyle(p.BOLD); p.fill(modeCol);
+        p.text('STATUS: ' + modeStr, 30, 40);
+
+        p.textStyle(p.NORMAL); p.fill(220); p.textSize(11);
+        p.text(`Tema Warna  : ${PALETTES[currentPaletteIdx].name}`, 30, 62);
+        p.text(`Jumlah Motif: ${mgr.motifs.length} objek`, 30, 80);
+        p.text(`Skor Gerakan: ${sns.motionScore.toFixed(1)}%`, 30, 98);
+        p.text(`Kamera      : ${camStr}`, 30, 116);
+
+        p.stroke(255,255,255,20); p.line(30,128,280,128);
+        p.noStroke(); p.fill(120); p.textSize(10);
+        p.text('[H] UI  [C] Warna  [F] Fullscreen  [S] Simpan', 30, 144);
+        p.pop();
+    }
+
+}; // end sketch
+</script>
+</body>
+</html>
